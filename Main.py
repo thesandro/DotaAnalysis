@@ -1,24 +1,34 @@
 import string
+from os import path
+from threading import Thread
+
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 from pandas import DataFrame
 from sklearn.model_selection import cross_val_score
 from sklearn.tree import DecisionTreeClassifier
-import os.path
-from os import path
-
-numberOfMatches = 150
-
+from sqlalchemy import create_engine
 import sys
-from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QPushButton, QAction, QLineEdit, QMessageBox
+from PyQt5.QtWidgets import QMainWindow, QApplication, QPushButton, QLineEdit
 from PyQt5.QtCore import pyqtSlot
 import pandas as pd
 
+# სატესტოდ ვიყენებ მატჩების ზომის წასაკითხად
+numberOfMatches = 150
+
 """
-    თავდაპირველად player.csv შეიცავს id-ებს hero-ს და item-ის სახელის მაგივრად,
-    ამიტომ საჭიროებს დაფორმატებას.
-    კლასს კონსტრუქტორში გადაეწოდება სამი ფაილის მისამართი string ტიპად და ხდება შემდგომ DataFrame-ს დამუშავება.
+    Dota 2 არის კომპიუტერული ონლაინ თამაში, სადაც ყოველ მატჩში ერკინება ერთმანეტს ორი 5 კაციანი გუნდი,
+    თამაშში არსებობს ორი მხარე Dire და Radiant, რომლებშიც მოთამაშეებს სისტემა ანაწილებს.
+    თამაშში შესაძლებელია შესაბამისი პერსონაჟის/hero-ს არჩევა და შემდგომ საკმარისი "ოქროს" მოპოვების შემთხვევაში,
+    ნივთების/item-ის ყიდვა, სულ თამაშში 119 გმირია და ყველა გმირზე შესაძლებელია 115 ნივთზე მეტის ყიდვა.
+    რადგან გმირების, ნივთების და გუნდის მხარის ამდენი ვარიაცია არსეობს, ვაკეთებთ ანალიზს ახდენს გავლენას თუ არა
+    რაიმე გმირის/ნივთის არჩევა.
 """
 
 
+# თავდაპირველად player.csv შეიცავს id-ებს hero-ს და item-ის სახელის მაგივრად,
+# ამიტომ საჭიროებს დაფორმატებას.
+# კლასს კონსტრუქტორში გადაეწოდება სამი ფაილის მისამართი string ტიპად და ხდება შემდგომ DataFrame-ს დამუშავება.
 class PlayerFormatter:
     players: DataFrame
 
@@ -29,12 +39,18 @@ class PlayerFormatter:
 
     # კითხულოვ ფაილებს pd.read_csv-ს მეშვეობით და შემდგომ იძახებს player-ის დაფორმატების მეთოდებს
     # სადაც პირველად player-ი შეიცავს id-ებს სახელების მაგივრად
+    # ვახდენთ დამუშავებას thread-ებით, რადგან ერთამენთისგან დამოუკიდებლები არიან
+    # ასევე ვიყენებტ join-ს, რომ main thread დაელოდოს და ორივემ დაასრულოს მუშაობა
     def readFiles(self, players_path: string, heroes_path: string, items_path: string):
         self.players = pd.read_csv(players_path, nrows=10 * numberOfMatches)
         heroes = pd.read_csv(heroes_path)
         items = pd.read_csv(items_path)
-        self.formatPlayerHeroes(heroes)
-        self.formatPlayerItems(items)
+        t1 = Thread(target=self.formatPlayerHeroes(heroes))
+        t2 = Thread(target=self.formatPlayerItems(items))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
     # გადაეცემა heroes და შემდგომ ხდება მის მიხედვით player-ის დაფორმატება
     def formatPlayerHeroes(self, heroes_temp: DataFrame):
@@ -95,7 +111,6 @@ class RadiantDireData:
             .add(item3, fill_value=0) \
             .add(item4, fill_value=0) \
             .add(item5, fill_value=0)
-        print(player_items)
         # ვქმნით სვეტებს ორივე გუნდის ტიპისთვის (Dire და Radiant)
         radiant_cols = list(map(lambda s: 'radiant_' + s, player_heroes.columns.values))
         dire_cols = list(map(lambda s: 'dire_' + s, player_heroes.columns.values))
@@ -149,11 +164,28 @@ class DecisionTree:
         feature_importance = pd.Series(feature_importance).sort_values(ascending=False)
         return feature_importance
 
+# ცალკე კლასი მონაცემთა ბაზისთვის
+class Database:
+    def __init__(self, dbname):
+        self.sql_engine = create_engine('sqlite:///' + dbname, echo=False)
+
+
+# გრაფიკულად გამოსატანდ სიმარტივისთვის ვიყენებთ კლასს
+class MplCanvas(FigureCanvasQTAgg):
+
+    def __init__(self, parent=None, width=5, height=4, dpi=80):
+        # ვქმნით Figure-ს რომელზეც შემდგომ დავხატავთ plot-ს
+        fig = Figure(figsize=(width, height), dpi=dpi)
+        self.axes = fig.add_subplot(111)
+        super(MplCanvas, self).__init__(fig)
+
 
 class App(QMainWindow):
 
+    # ვქმნით ყველა ვიზუალურ ელემენტს
     def __init__(self):
         super().__init__()
+        self.button = QPushButton('Predict winning heroes/items', self)
         self.textboxPlayers = QLineEdit(self)
         self.textboxMatches = QLineEdit(self)
         self.textboxHeroes = QLineEdit(self)
@@ -164,13 +196,13 @@ class App(QMainWindow):
         self.width = 360
         self.initUI()
 
+    # ვახდენთ მონაცემთა და მდებარეობის მინიჭებას
     def initUI(self):
         self.textboxPlayers.setText("players")
         self.textboxMatches.setText("match")
         self.textboxHeroes.setText("hero_names")
         self.textboxItems.setText("item_ids")
         self.setWindowTitle(self.title)
-        # Create textbox Players
         y = 20
         self.textboxPlayers.move(20, y)
         self.textboxPlayers.resize(280, 40)
@@ -185,26 +217,26 @@ class App(QMainWindow):
         self.textboxItems.resize(280, 40)
 
         y += 50
-        # Create a button in the window
 
-        self.button = QPushButton('Predict winning heroes/items', self)
         self.button.move(20, y)
-        y += 50
+        y += 100
 
         self.setGeometry(self.left, self.top, self.width, y)
 
-        # connect button to function on_click
+        # ფუნქციას ვუკავშირებთ button-ს
         self.button.clicked.connect(self.on_click)
         self.show()
 
     @pyqtSlot()
     def on_click(self):
+        # ვირებთ სახელებს და ვწერთ dict-ში და ვანიჭებთ ფორმატს
         path_dict = dict()
         path_dict["players"] = self.textboxPlayers.text() + ".csv"
         path_dict["matches"] = self.textboxMatches.text() + ".csv"
         path_dict["heroes"] = self.textboxHeroes.text() + ".csv"
         path_dict["items"] = self.textboxItems.text() + ".csv"
 
+        # ვამოწმებთ ფაილები მოიძებნა თუ არა
         for key in path_dict.keys():
             if not path.exists(path_dict[key]):
                 print("file not found: " + key)
@@ -219,6 +251,14 @@ class App(QMainWindow):
         X = pd.concat([data.radiant_heroes, data.radiant_items, data.dire_heroes, data.dire_items], axis=1)
         # X.to_csv('mapped_match_hero_item.csv', index=False)
 
+        # ვინახავთ ინფორმაციას sqlite3 ბაზაში
+        try:
+            temp = Database("database-new.db")
+        except Exception as e:
+            print(e)
+
+        X.to_sql("table1", temp.sql_engine, index=False)
+
         # ვკითხულობთ match-ებს აქ არის აღნიშული თუ რომელი მატჩი მოიგო dire/radiant-მა
         matches = pd.read_csv('match.csv', nrows=numberOfMatches)
         # რადგან ფრე შეუძლებელია რომ მოხდებს,
@@ -227,14 +267,20 @@ class App(QMainWindow):
 
         # ვაგებთ ხეს
         dt = DecisionTree(X, Y)
+        dt.print_cross_validation()
         # ვიღებთ სტატებს როგორც Series
         stats = dt.get_tree_stats()
 
         # ვახდენთ ვიზუალურად წარმოდგენას
         # თუ რომელი ნივთი/გმირი ახდენს მოგებაზე გავლენას
-
-        # stats.plot()
-        # self.show()
+        sc = MplCanvas(self, width=5, height=4, dpi=80)
+        sc.axes.plot(stats.head(20))
+        # ვატრიალებთ label-ებს რომ მარტივად წაკითხვადი იყოს
+        sc.figure.autofmt_xdate(rotation=90)
+        self.setCentralWidget(sc)
+    # print(stats)
+    # stats.plot()
+    # self.show()
 
 
 app = QApplication(sys.argv)
